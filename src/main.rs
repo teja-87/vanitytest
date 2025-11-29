@@ -1,175 +1,200 @@
-use axum::{
-    extract::State,
-    http::StatusCode,
-    response::IntoResponse,
-    routing::post,
-    Json, Router,
-};
-use serde::{Deserialize, Serialize};
-use sqlx::{PgPool, FromRow};
-use chrono::{DateTime, Utc};
+use axum::{extract::State, Json, Router, routing::post};
+use serde_json::{json, Value};
+use sqlx::PgPool;
 use std::sync::Arc;
+use tower_http::cors::{Any, CorsLayer};
 
-// Helius webhook payload structures
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct HeliusWebhook {
-    #[serde(default)]
-    pub transaction: Option<TransactionData>,
-    #[serde(default)]
-    pub native_transfers: Option<Vec<NativeTransfer>>,
-    pub timestamp: i64,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct TransactionData {
-    pub signature: String,
-    pub slot: i64,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct NativeTransfer {
-    pub from_user_account: String,
-    pub to_user_account: String,
-    pub amount: u64, // lamports
-}
-
-// Database model
-#[derive(Debug, FromRow, Serialize)]
-struct Transaction {
-    pub id: i32,
-    pub signature: String,
-    pub sender: String,
-    pub receiver: String,
-    pub amount_lamports: i64,
-    pub amount_sol: f64,
-    pub timestamp: DateTime<Utc>,
-    pub created_at: DateTime<Utc>,
-}
-
-// Application state
 #[derive(Clone)]
 struct AppState {
-    db: PgPool,
-}
-
-// Response structure
-#[derive(Serialize)]
-struct WebhookResponse {
-    success: bool,
-    message: String,
+    pool: Arc<PgPool>,
 }
 
 #[tokio::main]
 async fn main() {
-    // Initialize tracing
-    tracing_subscriber::fmt::init();
+  
+    let db_url = "postgresql://neondb_owner:npg_fxOyd0mlEh4e@ep-dawn-math-a19l7rm1.ap-southeast-1.aws.neon.tech/neondb?sslmode=require&channel_binding=require";
 
-    // Database connection - replace with your connection string
-    let database_url = std::env::var("DATABASE_URL")
-        .unwrap_or_else(|_| "postgresql://user:password@localhost/solana_vanity".to_string());
+    println!("🔌 Connecting to database...");
+    println!("📍 Host: {}", db_url.split('@').nth(1).unwrap_or("hidden").split('/').next().unwrap_or("hidden"));
     
-    let pool = PgPool::connect(&database_url)
-        .await
-        .expect("Failed to connect to Postgres");
+    let pool = match PgPool::connect(&db_url).await {
+        Ok(p) => {
+            println!("✅ Database connected successfully!");
+            p
+        }
+        Err(e) => {
+            eprintln!("❌ Failed to connect: {:?}", e);
+            eprintln!("\n💡 Tips:");
+            eprintln!("1. Check your DATABASE_URL is correct");
+            eprintln!("2. Ensure your database is not paused");
+            eprintln!("3. Test with: psql \"YOUR_CONNECTION_STRING\"");
+            eprintln!("4. Try different provider (Neon/Supabase/Nhost)");
+            panic!("Cannot start without database");
+        }
+    };
 
-    let state = Arc::new(AppState { db: pool });
+    // Test database with simple query
+    match sqlx::query("SELECT 1 as test").fetch_one(&pool).await {
+        Ok(_) => println!("✅ Database query test passed!"),
+        Err(e) => {
+            eprintln!("❌ Database query failed: {:?}", e);
+            eprintln!("Connection works but queries are failing - check your database!");
+            panic!("Database issue");
+        }
+    }
+    
+    println!("\n🚀 Server starting on 0.0.0.0:3000");
+    
+    let state = AppState { 
+        pool: Arc::new(pool) 
+    };
 
-    // Build router
+    let cors = CorsLayer::new()
+        .allow_origin(Any)
+        .allow_methods(Any)
+        .allow_headers(Any);
+   
     let app = Router::new()
-        .route("/webhook/helius", post(helius_webhook_handler))
+        .route("/webhook", post(webhook_handler))
+        .route("/frontdata", post(checkdata))
         .route("/health", axum::routing::get(health_check))
+        .layer(cors)
         .with_state(state);
-
-    // Start server
+    
     let listener = tokio::net::TcpListener::bind("0.0.0.0:3000")
         .await
         .unwrap();
     
-    println!("Server running on http://0.0.0.0:3000");
+    println!("👂 Listening on http://0.0.0.0:3000");
+    println!("📡 Webhook endpoint: http://0.0.0.0:3000/webhook");
+    println!("🏥 Health check: http://0.0.0.0:3000/health\n");
     
     axum::serve(listener, app).await.unwrap();
 }
 
-async fn helius_webhook_handler(
-    State(state): State<Arc<AppState>>,
-    Json(payload): Json<HeliusWebhook>,
-) -> impl IntoResponse {
-    println!("Received webhook: {:?}", payload);
-
-    // Extract transaction signature
-    let signature = match &payload.transaction {
-        Some(tx) => tx.signature.clone(),
-        None => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(WebhookResponse {
-                    success: false,
-                    message: "No transaction data".to_string(),
-                }),
-            );
-        }
-    };
-
-    // Process native transfers
-    if let Some(transfers) = payload.native_transfers {
-        for transfer in transfers {
-            let amount_lamports = transfer.amount as i64;
-            let amount_sol = amount_lamports as f64 / 1_000_000_000.0;
+async fn webhook_handler(
+    State(state): State<AppState>,
+    Json(thedata): Json<Value>,
+) -> Json<Value> {
+    println!("\n🔔 ========== WEBHOOK RECEIVED ==========");
+    println!("📦 Full data: {:#}", thedata);
+    
+    // Helius sends an array of transactions
+    let transactions = if thedata.is_array() {
+        thedata.as_array().unwrap()
+    } else {
+        // Fallback: maybe it's a single object
+        println!("⚠️  Data is not an array, treating as single transaction");
+        return Json(json!({
+            "status": "error",
+            "message": "Expected array of transactions"
+        }));
+    }; 
+    
+    println!("📋 Found {} transaction(s)", transactions.len());
+    
+    for (idx, tx) in transactions.iter().enumerate() {
+        println!("\n📌 Transaction #{}", idx + 1);
+        
+        let sig = tx["signature"].as_str().unwrap_or("UNKNOWN");
+        let slot = tx["slot"].as_i64().unwrap_or(0);
+        let timestamp = tx["timestamp"].as_i64();
+        let fee_payer = tx["feePayer"].as_str().unwrap_or("UNKNOWN");
+        
+        println!("   🔑 Signature: {}", sig);
+        println!("   📊 Slot: {}", slot);
+        println!("   ⏰ Timestamp: {}", timestamp.unwrap_or(0));
+        println!("   💳 Fee Payer: {}", fee_payer);
+        
+        // Process native transfers
+        if let Some(native_transfers) = tx["nativeTransfers"].as_array() {
+            println!("   💸 Native Transfers: {}", native_transfers.len());
             
-            let timestamp = DateTime::from_timestamp(payload.timestamp, 0)
-                .unwrap_or_else(|| Utc::now());
-
-            // Insert into database
-            match sqlx::query(
-                r#"
-                INSERT INTO transactions (signature, sender, receiver, amount_lamports, amount_sol, timestamp)
-                VALUES ($1, $2, $3, $4, $5, $6)
-                ON CONFLICT (signature) DO NOTHING
-                "#
-            )
-            .bind(&signature)
-            .bind(&transfer.from_user_account)
-            .bind(&transfer.to_user_account)
-            .bind(amount_lamports)
-            .bind(amount_sol)
-            .bind(timestamp)
-            .execute(&state.db)
-            .await
-            {
-                Ok(_) => {
-                    println!(
-                        "Stored transaction: {} SOL from {} to {}",
-                        amount_sol,
-                        transfer.from_user_account,
-                        transfer.to_user_account
-                    );
-                }
-                Err(e) => {
-                    eprintln!("Database error: {:?}", e);
-                    return (
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        Json(WebhookResponse {
-                            success: false,
-                            message: format!("Database error: {}", e),
-                        }),
-                    );
+            for transfer in native_transfers {
+                let from = transfer["fromUserAccount"].as_str().unwrap_or("UNKNOWN");
+                let to = transfer["toUserAccount"].as_str().unwrap_or("UNKNOWN");
+                let amount = transfer["amount"].as_u64().unwrap_or(0);
+                let amount_sol = amount as f64 / 1_000_000_000.0;
+                
+                println!("\n   💰 Transfer:");
+                println!("      📤 From: {}", from);
+                println!("      📥 To: {}", to);
+                println!("      💵 Amount: {} lamports ({} SOL)", amount, amount_sol);
+                
+                // Insert into database
+                match add_paid(
+                    &state.pool,
+                    sig,
+                    from,
+                    amount,
+                    slot,
+                    timestamp,
+                    to
+                ).await {
+                    Ok(_) => println!("      ✅ DB INSERT SUCCESS"),
+                    Err(e) => println!("      ❌ DB INSERT FAILED: {:?}", e),
                 }
             }
+        } else {
+            println!("   ⚠️  No native transfers found");
         }
     }
-
-    (
-        StatusCode::OK,
-        Json(WebhookResponse {
-            success: true,
-            message: "Webhook processed successfully".to_string(),
-        }),
-    )
+    
+    println!("========================================\n");
+    
+    // Respond fast to Helius
+    Json(json!({
+        "status": "ok bro",
+        "received": true
+    }))
 }
 
-async fn health_check() -> impl IntoResponse {
-    (StatusCode::OK, "OK")
+
+async fn checkdata(State(_state): State<AppState>, Json(data): Json<Value>) -> Json<Value> {
+    println!("front data{:?}", data);
+
+    
+    
+
+
+
+    Json(json!({"status": "ok"}))
+}
+
+async fn health_check() -> &'static str {
+    "OK"
+}
+
+// Database function - add transaction
+async fn add_paid(
+    pool: &PgPool,
+    signature: &str,
+    sender: &str,
+    lamports: u64,
+    _slot: i64, // Keep parameter but don't use it
+    timestamp: Option<i64>,
+    receiver: &str,
+) -> Result<(), sqlx::Error> {
+    let amount_sol = lamports as f64 / 1_000_000_000.0;
+    
+    // Use provided timestamp or current time
+    let ts = timestamp.unwrap_or_else(|| chrono::Utc::now().timestamp());
+    
+    sqlx::query(
+        r#"
+        INSERT INTO transactions (signature, sender, receiver, amount_lamports, amount_sol, timestamp)
+        VALUES ($1, $2, $3, $4, $5, to_timestamp($6))
+        ON CONFLICT (signature) DO NOTHING
+        "#
+    )
+    .bind(signature)
+    .bind(sender)
+    .bind(receiver)
+    .bind(lamports as i64)
+    .bind(amount_sol)
+    .bind(ts)
+    .execute(pool)
+    .await?;
+    
+    Ok(())
 }
