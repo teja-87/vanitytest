@@ -1,4 +1,5 @@
 use axum::{extract::State, Json, Router, routing::post};
+use serde::Deserialize;
 use serde_json::{json, Value};
 use sqlx::PgPool;
 use std::sync::Arc;
@@ -149,9 +150,22 @@ async fn webhook_handler(
     }))
 }
 
-
-async fn checkdata(State(_state): State<AppState>, Json(data): Json<Value>) -> Json<Value> {
+#[derive(Debug, Deserialize)]
+struct FrontDa {
+        word:String,
+        publickey:String,
+        sign:Vec<u8>,
+        
+}
+async fn checkdata(State(_state): State<AppState>, Json(data): Json<FrontDa>) -> Json<Value> {
     println!("front data{:?}", data);
+    println!("front data{:?}", data.publickey);
+    println!("front data{:?}", data.sign);
+    println!("front data{:?}", data.word);
+    
+    
+
+
 
     
     
