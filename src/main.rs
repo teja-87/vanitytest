@@ -12,7 +12,7 @@ struct AppState {
 #[tokio::main]
 async fn main() {
   
-    let db_url = "postgresql://neondb_owner:npg_fxOyd0mlEh4e@ep-dawn-math-a19l7rm1.ap-southeast-1.aws.neon.tech/neondb?sslmode=require&channel_binding=require";
+    let db_url = "";
 
     println!("🔌 Connecting to database...");
     println!("📍 Host: {}", db_url.split('@').nth(1).unwrap_or("hidden").split('/').next().unwrap_or("hidden"));
