@@ -2,8 +2,14 @@ use axum::{extract::State, Json, Router, routing::post};
 use serde::Deserialize;
 use serde_json::{json, Value};
 use sqlx::PgPool;
+use tracing_subscriber::fmt::format;
 use std::sync::Arc;
 use tower_http::cors::{Any, CorsLayer};
+
+
+use ed25519_dalek::{Verifier, VerifyingKey, Signature as DalekSignature};
+use bs58;
+
 
 #[derive(Clone)]
 struct AppState {
@@ -13,7 +19,7 @@ struct AppState {
 #[tokio::main]
 async fn main() {
   
-    let db_url = "";
+    let db_url = "postgresql://neondb_owner:npg_fxOyd0mlEh4e@ep-dawn-math-a19l7rm1.ap-southeast-1.aws.neon.tech/neondb?sslmode=require&channel_binding=require";
 
     println!("🔌 Connecting to database...");
     println!("📍 Host: {}", db_url.split('@').nth(1).unwrap_or("hidden").split('/').next().unwrap_or("hidden"));
@@ -66,6 +72,7 @@ async fn main() {
         .await
         .unwrap();
     
+
     println!("👂 Listening on http://0.0.0.0:3000");
     println!("📡 Webhook endpoint: http://0.0.0.0:3000/webhook");
     println!("🏥 Health check: http://0.0.0.0:3000/health\n");
@@ -155,26 +162,58 @@ struct FrontDa {
         word:String,
         publickey:String,
         sign:Vec<u8>,
+        message:Vec<u8>,
         
 }
 async fn checkdata(State(_state): State<AppState>, Json(data): Json<FrontDa>) -> Json<Value> {
-    println!("front data{:?}", data);
-    println!("front data{:?}", data.publickey);
-    println!("front data{:?}", data.sign);
-    println!("front data{:?}", data.word);
+    println!("front data{:?} ", data);
+   
     
+    let message = data.message;
+    let sign = data.sign;
+    let publickey =data.publickey;
+
+    match verify_sig(&message,&sign,&publickey){
+
+        Ok(_)=>{
+             println!("✅ SIGNATURE VERIFIED! User owns this wallet!");
+             println!("========================================\n");
+               Json(json!({
+                "status": "success",
+                "message": "Signature verified successfully!",
+                "verified": true
+            }))
+        }
+        Err(e)=> {
+             println!("❌ VERIFICATION FAILED: {}", e);
+            println!("========================================\n");
+            Json(json!({
+                "status": "error",
+                "message": format!("Signature verification failed: {}", e),
+                "verified": false
+            }))
+            }
+
     
-
-
-
-    
-    
-
-
-
-    Json(json!({"status": "ok"}))
+  
+}
 }
 
+fn verify_sig(message:&[u8],sign:&[u8],publickey:&str)->Result<(),String>{
+
+
+     
+    let signe = DalekSignature::from_bytes(sign.try_into().map_err(|e| format!("invalid sign:{}",e))?);
+    let publikey =bs58::decode(&publickey).into_vec().map_err(|e| format!("Invalid msg type {:?}",e))?;;
+    let verifying_key=VerifyingKey::from_bytes(publikey.as_slice().try_into().map_err(|_| "Failed to parse public key")?
+    ).map_err(|e| format!("Invalid verifying key: {}", e))?;
+
+
+    verifying_key.verify(message, &signe).map_err(|e| format!("Verification failed: {}", e))?;
+
+
+      Ok(())
+}
 async fn health_check() -> &'static str {
     "OK"
 }
@@ -211,4 +250,11 @@ async fn add_paid(
     .await?;
     
     Ok(())
+}
+
+//function for checing the payment
+
+async fn check_db(publickey:&str)->Result<(),String>{
+         
+         sqlx::query("select Paid, from payments")
 }
