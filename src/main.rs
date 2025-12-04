@@ -232,10 +232,16 @@ async fn add_paid(
     
     // Use provided timestamp or current time
     let ts = timestamp.unwrap_or_else(|| chrono::Utc::now().timestamp());
+    let mut is_paid = false;
+    if (amount_sol>=0.1){
+         
+         is_paid = true;
+
+    }
     
     sqlx::query(
         r#"
-        INSERT INTO transactions (signature, sender, receiver, amount_lamports, amount_sol, timestamp)
+        INSERT INTO transactions (signature, sender, receiver, amount_sol, paid_at)
         VALUES ($1, $2, $3, $4, $5, to_timestamp($6))
         ON CONFLICT (signature) DO NOTHING
         "#
@@ -243,9 +249,9 @@ async fn add_paid(
     .bind(signature)
     .bind(sender)
     .bind(receiver)
-    .bind(lamports as i64)
     .bind(amount_sol)
     .bind(ts)
+    .bind(is_paid)
     .execute(pool)
     .await?;
     
@@ -254,7 +260,10 @@ async fn add_paid(
 
 //function for checing the payment
 
-async fn check_db(publickey:&str)->Result<(),String>{
+async fn check_db(pool: &PgPool,publickey:&str)->Result<(),String>{
          
-         sqlx::query("select Paid, from payments")
+         sqlx::query(r#"SELECT is_Paid, amount_sol,is_used,is_genrated from vanity_orders WHERE sender=$1"#)
+         .bind(publickey).fetch_one(pool).await.map_err(|e| e.to_string())?;
+
+        Ok(())
 }
