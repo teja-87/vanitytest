@@ -241,7 +241,7 @@ async fn add_paid(
     
     sqlx::query(
         r#"
-        INSERT INTO transactions (signature, sender, receiver, amount_sol, paid_at)
+        INSERT INTO transactions (signature, sender, receiver, amount_sol,paid_at,is_paid )
         VALUES ($1, $2, $3, $4, $5, to_timestamp($6))
         ON CONFLICT (signature) DO NOTHING
         "#
