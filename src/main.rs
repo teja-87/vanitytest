@@ -165,7 +165,7 @@ struct FrontDa {
         message:Vec<u8>,
         
 }
-async fn checkdata(State(_state): State<AppState>, Json(data): Json<FrontDa>) -> Json<Value> {
+async fn checkdata(State(state): State<AppState>, Json(data): Json<FrontDa>) -> Json<Value> {
     println!("front data{:?} ", data);
    
     
@@ -173,11 +173,31 @@ async fn checkdata(State(_state): State<AppState>, Json(data): Json<FrontDa>) ->
     let sign = data.sign;
     let publickey =data.publickey;
 
-    match verify_sig(&message,&sign,&publickey){
+    match verify_sig(&message,&sign,&publickey).await{
 
         Ok(_)=>{
              println!("✅ SIGNATURE VERIFIED! User owns this wallet!");
              println!("========================================\n");
+             let ret =check_db( &state.pool,&publickey).await;
+             match ret{
+                Ok(r)=>{
+                    if r.is_paid==true && r.is_used==false{
+                            match isused(&state.pool, &r.tx_signature).await {
+                                            Ok(_) => println!("✅ Marked as used"),
+                                            Err(e) => println!("❌ Failed to mark as used: {}", e),
+                                        }
+                      
+                        // vanity generate code function goes here
+                       
+
+
+                    }
+                }
+                Err(e)=>{
+                     println!("error checking data:{}",e);
+                }
+             }
+            
                Json(json!({
                 "status": "success",
                 "message": "Signature verified successfully!",
@@ -199,7 +219,7 @@ async fn checkdata(State(_state): State<AppState>, Json(data): Json<FrontDa>) ->
 }
 }
 
-fn verify_sig(message:&[u8],sign:&[u8],publickey:&str)->Result<(),String>{
+async fn verify_sig(message:&[u8],sign:&[u8],publickey:&str)->Result<(),String>{
 
 
      
@@ -224,33 +244,34 @@ async fn add_paid(
     signature: &str,
     sender: &str,
     lamports: u64,
-    _slot: i64, // Keep parameter but don't use it
+    _slot: i64,
     timestamp: Option<i64>,
     receiver: &str,
 ) -> Result<(), sqlx::Error> {
     let amount_sol = lamports as f64 / 1_000_000_000.0;
     
+    // Check if payment is sufficient
+    let is_paid = amount_sol >= 0.1;
+    
     // Use provided timestamp or current time
-    let ts = timestamp.unwrap_or_else(|| chrono::Utc::now().timestamp());
-    let mut is_paid = false;
-    if (amount_sol>=0.1){
-         
-         is_paid = true;
-
-    }
+    let paid_at = timestamp.map(|ts| {
+        chrono::DateTime::from_timestamp(ts, 0)
+            .unwrap_or_else(|| chrono::Utc::now())
+    }).unwrap_or_else(|| chrono::Utc::now());
     
     sqlx::query(
         r#"
-        INSERT INTO transactions (signature, sender, receiver, amount_sol,paid_at,is_paid )
-        VALUES ($1, $2, $3, $4, $5, to_timestamp($6))
-        ON CONFLICT (signature) DO NOTHING
+        INSERT INTO vanity_orders 
+        (tx_signature, sender, receiver, amount_sol, paid_at, is_paid)
+        VALUES ($1, $2, $3, $4, $5, $6)
+        ON CONFLICT (tx_signature) DO NOTHING
         "#
     )
     .bind(signature)
     .bind(sender)
     .bind(receiver)
     .bind(amount_sol)
-    .bind(ts)
+    .bind(paid_at)
     .bind(is_paid)
     .execute(pool)
     .await?;
@@ -259,11 +280,49 @@ async fn add_paid(
 }
 
 //function for checing the payment
+#[derive(Debug,sqlx::FromRow)]
+struct Rowsql{
+    is_paid:bool,
+    amount_sol:f64,
+    is_used:bool,
+    is_generated:bool,
+    tx_signature:String,
+}
 
-async fn check_db(pool: &PgPool,publickey:&str)->Result<(),String>{
+async fn check_db(pool: &PgPool,publickey:&str)->Result<Rowsql,String>{
+
+    println!("checking db here and this is the publickey : {}", publickey);
          
-         sqlx::query(r#"SELECT is_Paid, amount_sol,is_used,is_genrated from vanity_orders WHERE sender=$1"#)
-         .bind(publickey).fetch_one(pool).await.map_err(|e| e.to_string())?;
+        let row= sqlx::query_as::<_, Rowsql>(
+            r#"SELECT is_paid, amount_sol,is_used,is_generated, tx_signature from vanity_orders WHERE sender=$1"#)
+         .bind(publickey).fetch_one(pool).await;
 
-        Ok(())
+        match row{
+            Ok(r)=>{
+                println!("the sql row is :{:?}", r);
+                return Ok(r)
+            }
+
+            Err(e)=>{
+                println!("there is a error:{}",e);
+                return Err(e.to_string())
+            }
+        }
+        
+       
+}
+
+async fn isused(pool: &PgPool,signatur:&str)->Result<sqlx::postgres::PgQueryResult,String>{
+    let insert=sqlx::query(r#"UPDATE vanity_orders SET is_used=TRUE WHERE tx_signature=$1 "#)
+    .bind(signatur).execute(pool).await;
+
+        match insert {
+            Ok(i)=>{
+                Ok(i)
+            }
+            Err(e)=>{
+                Err(e.to_string())
+            }
+            
+        }
 }
