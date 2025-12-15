@@ -150,7 +150,7 @@ async fn webhook_handler(
     
     println!("========================================\n");
     
-    // Respond fast to Helius
+    
     Json(json!({
         "status": "ok bro",
         "received": true
@@ -186,7 +186,8 @@ async fn checkdata(State(state): State<AppState>, Json(data): Json<FrontDa>) -> 
                                             Ok(_) => println!("✅ Marked as used"),
                                             Err(e) => println!("❌ Failed to mark as used: {}", e),
                                         }
-                      
+                            
+                            
                         // vanity generate code function goes here
                        
 
@@ -206,7 +207,7 @@ async fn checkdata(State(state): State<AppState>, Json(data): Json<FrontDa>) -> 
         }
         Err(e)=> {
              println!("❌ VERIFICATION FAILED: {}", e);
-            println!("========================================\n");
+          
             Json(json!({
                 "status": "error",
                 "message": format!("Signature verification failed: {}", e),
