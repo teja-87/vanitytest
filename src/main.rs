@@ -5,6 +5,7 @@ use sqlx::PgPool;
 use tracing_subscriber::fmt::format;
 use std::sync::Arc;
 use tower_http::cors::{Any, CorsLayer};
+use reqwest::Client;
 
 
 use ed25519_dalek::{Verifier, VerifyingKey, Signature as DalekSignature};
@@ -14,6 +15,8 @@ use bs58;
 #[derive(Clone)]
 struct AppState {
     pool: Arc<PgPool>,
+    worker_client:Client,
+    worker_url: String,
 }
 
 #[tokio::main]
@@ -51,9 +54,13 @@ async fn main() {
     }
     
     println!("\n🚀 Server starting on 0.0.0.0:3000");
-    
+    let worker_url="http://127.0.0.1:5000".to_string();
+    let client=Client::new();
     let state = AppState { 
-        pool: Arc::new(pool) 
+        pool: Arc::new(pool) ,
+
+        worker_client:client,
+        worker_url:worker_url,
     };
 
     let cors = CorsLayer::new()
@@ -165,6 +172,12 @@ struct FrontDa {
         message:Vec<u8>,
         
 }
+
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+
+struct JobPayLoad{
+    word:String,
+}
 async fn checkdata(State(state): State<AppState>, Json(data): Json<FrontDa>) -> Json<Value> {
     println!("front data{:?} ", data);
    
@@ -172,6 +185,7 @@ async fn checkdata(State(state): State<AppState>, Json(data): Json<FrontDa>) -> 
     let message = data.message;
     let sign = data.sign;
     let publickey =data.publickey;
+    let word=data.word;
 
     match verify_sig(&message,&sign,&publickey).await{
 
@@ -181,16 +195,58 @@ async fn checkdata(State(state): State<AppState>, Json(data): Json<FrontDa>) -> 
              let ret =check_db( &state.pool,&publickey).await;
              match ret{
                 Ok(r)=>{
+                    println!("DEBUG → is_paid={}, is_used={}", r.is_paid, r.is_used);
+
                     if r.is_paid==true && r.is_used==false{
                             match isused(&state.pool, &r.tx_signature).await {
-                                            Ok(_) => println!("✅ Marked as used"),
+                                            Ok(_) => println!("✅ Marked as used"),  
                                             Err(e) => println!("❌ Failed to mark as used: {}", e),
                                         }
                             
                             
                         // vanity generate code function goes here
-                       
+                        let payload = JobPayLoad{
+                            word:word.clone(),
+                        };
 
+                        let worker_url = format!("{}/wordyword", state.worker_url);
+
+                        let han=tokio::spawn(async move{
+                             state.worker_client.post(&worker_url).json(&payload)
+                            .send().await});
+                               
+                             match han.await {
+                                    Ok(Ok(response)) => {
+                                        match response.json::<serde_json::Value>().await {
+                                            Ok(worker_data) => {
+                                                println!("🔥 WORKER DATA: {:?}", worker_data);
+                                               return  Json(json!({
+                                                    "data":worker_data
+                                                }))
+                                            }
+                                            Err(e) => {
+                                                eprintln!("❌ Failed to parse worker response JSON: {}", e);
+                                            }
+                                        }
+                                    }
+                                    Ok(Err(e)) => {
+                                        eprintln!("❌ HTTP request to worker failed: {}", e);
+                                    }
+                                    Err(e) => {
+                                        eprintln!("❌ Worker task panicked: {}", e);
+                                    }
+                                }
+                                                    
+
+
+                    }
+                    else if r.is_paid==true && r.is_used==true {
+
+                            let msg= format!("{},is already used ",&publickey);
+                            println!("returning the used true data ");
+                        return Json(
+                            json!({"msg":msg}),
+                        );
 
                     }
                 }
