@@ -233,7 +233,7 @@ async fn checkdata(State(state): State<AppState>, Json(data): Json<FrontDa>) -> 
                                         eprintln!("❌ HTTP request to worker failed: {}", e);
                                     }
                                     Err(e) => {
-                                        eprintln!("❌ Worker task panicked: {}", e);
+                                        eprintln!("❌ Worker task panicked and failed: {}", e);
                                     }
                                 }
                                                     
